@@ -2,6 +2,7 @@
 """
 Utilities for bounding box manipulation and GIoU.
 """
+import numpy as np
 import torch
 from torchvision.ops.boxes import box_area
 
@@ -11,6 +12,12 @@ def box_cxcywh_to_xyxy(x):
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
          (x_c + 0.5 * w), (y_c + 0.5 * h)]
     return torch.stack(b, dim=-1)
+
+def box_cxcywh_to_xyxy_np(x):
+    x_c, y_c, w, h = x
+    b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
+         (x_c + 0.5 * w), (y_c + 0.5 * h)]
+    return np.array(b)
 
 
 def box_xyxy_to_cxcywh(x):
