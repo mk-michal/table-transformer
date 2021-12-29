@@ -64,8 +64,11 @@ def get_supercell_rows_and_columns(supercells, rows, columns):
                 supercell['bbox'][3]
             ]
             bbox2 = Rect(supercell['bbox']).intersect(bbox1)
-            if bbox2.getArea() / Rect(bbox1).getArea() >= 0.5:
-                column_matches.add(column_num)
+            try:
+                if bbox2.getArea() / Rect(bbox1).getArea() >= 0.5:
+                    column_matches.add(column_num)
+            except ZeroDivisionError:
+                print(f'Bbox with zero or negative size. Skip bbox and move to another ')
         already_taken = False
         this_matches = []
         for row_num in row_matches:
@@ -653,7 +656,7 @@ def plot_graph(metric_1, metric_2, metric_1_name, metric_2_name):
     plt.show()
 
 
-def grits(args, model, dataset_test, device):
+def grits(args, model, dataset_test, device, evaluate_on_gt = True):
     """
     This function runs the GriTS proposed in the paper. We also have a debug
     mode which let's you see the outputs of a model on the pdf pages.
@@ -674,7 +677,7 @@ def grits(args, model, dataset_test, device):
     }
 
     if args.debug:
-        max_samples = 50
+        max_samples = min(50, len(dataset_test))
     else:
         max_samples = len(dataset_test)
     print(max_samples)
@@ -695,21 +698,24 @@ def grits(args, model, dataset_test, device):
         img, gt, orig_img, img_path = dataset_test[idx]
         img_filename = img_path.split("/")[-1]
         img_words_filepath = os.path.join(args.table_words_dir, img_filename.replace(".jpg", "_words.json"))
-        with open(img_words_filepath, 'r') as f:
-            page_tokens = json.load(f)
+        if evaluate_on_gt:
+            with open(img_words_filepath, 'r') as f:
+                page_tokens = json.load(f)
         img_test = img
         scale = 1000 / max(orig_img.size)
         img = normalize(img)
-        for word in page_tokens:
-            word['bbox'] = [elem * scale for elem in word['bbox']]
+        if evaluate_on_gt:
+            for word in page_tokens:
+                word['bbox'] = [elem * scale for elem in word['bbox']]
 
         #---Compute ground truth features
-        true_bboxes = [list(elem) for elem in gt['boxes'].cpu().numpy()]
-        true_labels = gt['labels'].cpu().numpy()
-        true_scores = [1 for elem in true_bboxes]
-        true_table_structures, true_cells, true_confidence_score = objects_to_cells(true_bboxes, true_labels, true_scores,
-                                                                                    page_tokens, structure_class_names,
-                                                                                    structure_class_thresholds, structure_class_map)
+        if evaluate_on_gt:
+            true_bboxes = [list(elem) for elem in gt['boxes'].cpu().numpy()]
+            true_labels = gt['labels'].cpu().numpy()
+            true_scores = [1 for elem in true_bboxes]
+            true_table_structures, true_cells, true_confidence_score = objects_to_cells(true_bboxes, true_labels, true_scores,
+                                                                                        page_tokens, structure_class_names,
+                                                                                        structure_class_thresholds, structure_class_map)
 
         #---Compute predicted features
         # Propagate through the model
@@ -724,166 +730,183 @@ def grits(args, model, dataset_test, device):
         pred_bboxes = [bbox.tolist() for bbox in rescaled_bboxes]
         pred_labels = labels[0].tolist()
         pred_scores = scores[0].tolist()
-        pred_table_structures, pred_cells, pred_confidence_score = objects_to_cells(pred_bboxes, pred_labels, pred_scores,
-                                                                                    page_tokens, structure_class_names,
-                                                                                    structure_class_thresholds, structure_class_map)
 
-        metrics = compute_metrics(true_bboxes, true_labels, true_scores, true_cells,
-                                  pred_bboxes, pred_labels, pred_scores, pred_cells)
-        statistics = compute_statistics(true_table_structures, true_cells)
+        if evaluate_on_gt:
+            pred_table_structures, pred_cells, pred_confidence_score = objects_to_cells(pred_bboxes, pred_labels,
+                                                                                        pred_scores,
+                                                                                        page_tokens,
+                                                                                        structure_class_names,
+                                                                                        structure_class_thresholds,
+                                                                                        structure_class_map)
+            metrics = compute_metrics(true_bboxes, true_labels, true_scores, true_cells,
+                                      pred_bboxes, pred_labels, pred_scores, pred_cells)
+            statistics = compute_statistics(true_table_structures, true_cells)
 
-        metrics.update(statistics)
-        metrics['id'] = img_path.split('/')[-1].split('.')[0]
-        all_metrics.append(metrics)
+            metrics.update(statistics)
+            metrics['id'] = img_path.split('/')[-1].split('.')[0]
+            all_metrics.append(metrics)
 
-        if idx%1000==0:
-            with open(args.metrics_save_filepath, 'w') as outfile:
-                json.dump(all_metrics, outfile)
-            print("Total time taken for {} samples: {}".format(idx, datetime.now() - st_time))
+            if idx%1000==0:
+                with open(args.metrics_save_filepath, 'w') as outfile:
+                    json.dump(all_metrics, outfile)
+                print("Total time taken for {} samples: {}".format(idx, datetime.now() - st_time))
 
         #---Display output for debugging
         if args.debug:
-            print("GriTS RawLoc: {}".format(metrics["grits_rawloc"]))
-            print("GriTS Loc: {}".format(metrics["grits_loc"]))
-            print("GriTS Top: {}".format(metrics["grits_top"]))
-            print("GriTS Cont: {}".format(metrics["grits_cont"]))
-            print("Adjacency f-score: {}".format(metrics["adjacency_nonblank_fscore"]))
-            print("Adjacency w/ blanks f-score: {}".format(metrics["adjacency_withblank_fscore"]))
-
             fig,ax = plt.subplots(1)
             ax.imshow(img_test, interpolation='lanczos')
             fig.set_size_inches((15, 18))
-            plt.show()
+            if args.images_output_path:
+                plt.savefig(os.path.join(args.images_output_path, img_filename.split('.')[0] + '.jpg'), dpi=300, bbox_inches='tight')
+            else:
+                plt.show()
 
             fig,ax = plt.subplots(1)
             ax.imshow(img_test, interpolation='lanczos')
 
-            linewidth = 1
-            alpha = 0
-            for word in page_tokens:
-                bbox = word['bbox']
-                rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                         edgecolor='none',facecolor="orange", alpha=0.04)
-                ax.add_patch(rect)
-                rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                         edgecolor="orange",facecolor='none',linestyle="--")
-                ax.add_patch(rect)         
+
             rescaled_bboxes = rescale_bboxes(torch.tensor(boxes[0], dtype=torch.float32), img_test.size)
             for bbox, label, score in zip(rescaled_bboxes, labels[0].tolist(), scores[0].tolist()):
                 bbox = bbox.cpu().numpy().tolist()
                 if not label > 5 and score > 0.5:
                     color, alpha, linewidth = get_bbox_decorations(label, score)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=linewidth, 
+                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=linewidth,
                                              edgecolor='none',facecolor=color, alpha=alpha)
                     ax.add_patch(rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=linewidth, 
+                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=linewidth,
                                              edgecolor=color,facecolor='none',linestyle="--")
-                    ax.add_patch(rect) 
-
-            fig.set_size_inches((15, 18))
-            plt.show()
-
-            fig,ax = plt.subplots(1)
-            ax.imshow(img_test, interpolation='lanczos')    
-            for cell in true_cells:
-                bbox = cell['bbox']
-                rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                         edgecolor='none',facecolor="brown", alpha=0.04)
-                ax.add_patch(rect)
-                rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                         edgecolor="brown",facecolor='none',linestyle="--")
-                ax.add_patch(rect) 
-                cell_rect = Rect()
-                for span in cell['spans']:
-                    bbox = span['bbox']
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor='none',facecolor="green", alpha=0.2)
-                    ax.add_patch(rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor="green",facecolor='none',linestyle="--")
-                    ax.add_patch(rect) 
-                    cell_rect.includeRect(bbox)
-                if cell_rect.getArea() > 0:
-                    bbox = list(cell_rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor='none',facecolor="red", alpha=0.15)
-                    ax.add_patch(rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor="red",facecolor='none',linestyle="--")
                     ax.add_patch(rect)
 
-            fig.set_size_inches((15, 18))
-            plt.show()
+            plt.axis('off')
+            if args.images_output_path:
+                plt.savefig(os.path.join(args.images_output_path, img_filename.split('.')[0] + '_bboxes.jpg'), dpi=300, bbox_inches='tight')
+            else:
+                plt.show()
 
-            fig,ax = plt.subplots(1)
-            ax.imshow(img_test, interpolation='lanczos')
+            if evaluate_on_gt:
+                print("GriTS RawLoc: {}".format(metrics["grits_rawloc"]))
+                print("GriTS Loc: {}".format(metrics["grits_loc"]))
+                print("GriTS Top: {}".format(metrics["grits_top"]))
+                print("GriTS Cont: {}".format(metrics["grits_cont"]))
+                print("Adjacency f-score: {}".format(metrics["adjacency_nonblank_fscore"]))
+                print("Adjacency w/ blanks f-score: {}".format(metrics["adjacency_withblank_fscore"]))
 
-            for cell in pred_cells:
-                bbox = cell['bbox']
-                rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                         edgecolor='none',facecolor="magenta", alpha=0.15)
-                ax.add_patch(rect)
-                rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                         edgecolor="magenta",facecolor='none',linestyle="--")
-                ax.add_patch(rect) 
-                cell_rect = Rect()
-                for span in cell['spans']:
-                    bbox = span['bbox']
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor='none',facecolor="green", alpha=0.2)
+            if evaluate_on_gt:
+
+                linewidth = 1
+                alpha = 0
+
+                fig,ax = plt.subplots(1)
+                ax.imshow(img_test, interpolation='lanczos')
+                for cell in true_cells:
+                    bbox = cell['bbox']
+                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                             edgecolor='none',facecolor="brown", alpha=0.04)
                     ax.add_patch(rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor="green",facecolor='none',linestyle="--")
-                    ax.add_patch(rect) 
-                    cell_rect.includeRect(bbox)
-                if cell_rect.getArea() > 0:
-                    bbox = list(cell_rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor='none',facecolor="red", alpha=0.15)
+                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                             edgecolor="brown",facecolor='none',linestyle="--")
                     ax.add_patch(rect)
-                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1, 
-                                             edgecolor="red",facecolor='none',linestyle="--")
-                    ax.add_patch(rect) 
+                    cell_rect = Rect()
+                    for span in cell['spans']:
+                        bbox = span['bbox']
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor='none',facecolor="green", alpha=0.2)
+                        ax.add_patch(rect)
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor="green",facecolor='none',linestyle="--")
+                        ax.add_patch(rect)
+                        cell_rect.includeRect(bbox)
+                    if cell_rect.getArea() > 0:
+                        bbox = list(cell_rect)
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor='none',facecolor="red", alpha=0.15)
+                        ax.add_patch(rect)
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor="red",facecolor='none',linestyle="--")
+                        ax.add_patch(rect)
 
-            fig.set_size_inches((15, 18))
-            plt.show()
-    with open(args.metrics_save_filepath, 'w') as outfile:
-        json.dump(all_metrics, outfile)
-    print("Total time taken: ", datetime.now() - st_time)
+                fig.set_size_inches((15, 18))
 
-    print('-' * 100)
-    results = [result for result in all_metrics if result['num_spanning_cells'] == 0]
-    print("Results on simple tables ({} total):".format(len(results)))
-    print("GriTS_RawLoc: {}".format(np.mean([result['grits_rawloc'] for result in results])))
-    print("GriTS_Loc: {}".format(np.mean([result['grits_loc'] for result in results])))
-    print("GriTS_Cont: {}".format(np.mean([result['grits_cont'] for result in results])))
-    print("GriTS_Top: {}".format(np.mean([result['grits_top'] for result in results])))
-    print("Adjacency f-score: {}".format(np.mean([result['adjacency_nonblank_fscore'] for result in results])))
-    print("Adjacency w/ blanks f-score: {}".format(np.mean([result['adjacency_withblank_fscore'] for result in results])))
+                if args.images_output_path:
+                    plt.savefig(os.path.join(args.images_output_path, img_filename.split('.')[0] + '_gt.jpg'))
+                else:
+                    plt.show()
 
-    print('-' * 50)
-    results = [result for result in all_metrics if result['num_spanning_cells'] > 0]
-    print("Results on complicated tables ({} total):".format(len(results)))
-    print("GriTS_RawLoc: {}".format(np.mean([result['grits_rawloc'] for result in results])))
-    print("GriTS_Loc: {}".format(np.mean([result['grits_loc'] for result in results])))
-    print("GriTS_Cont: {}".format(np.mean([result['grits_cont'] for result in results])))
-    print("GriTS_Top: {}".format(np.mean([result['grits_top'] for result in results])))
-    print("Adjacency f-score: {}".format(np.mean([result['adjacency_nonblank_fscore'] for result in results])))
-    print("Adjacency w/ blanks f-score: {}".format(np.mean([result['adjacency_withblank_fscore'] for result in results])))
+                fig,ax = plt.subplots(1)
+                ax.imshow(img_test, interpolation='lanczos')
 
-    print('-' * 50)
-    results = [result for result in all_metrics]
-    print("Results on all tables ({} total):".format(len(results)))
-    print("GriTS_RawLoc: {}".format(np.mean([result['grits_rawloc'] for result in results if not math.isnan(result['grits_rawloc'])])))
-    print("GriTS_Loc: {}".format(np.mean([result['grits_loc'] for result in results])))
-    print("GriTS_Cont: {}".format(np.mean([result['grits_cont'] for result in results])))
-    print("GriTS_Top: {}".format(np.mean([result['grits_top'] for result in results])))
-    print("Adjacency f-score: {}".format(np.mean([result['adjacency_nonblank_fscore'] for result in results])))
-    print("Adjacency w/ blanks f-score: {}".format(np.mean([result['adjacency_withblank_fscore'] for result in results])))
-    # We can plot the graphs to see the correlation between different variations
-    # of similarity metrics by using plot_graph fn as shown below
-    #
-    # plot_graph([result[0] for result in results], [result[2] for result in results], "Raw BBox IoU", "BBox IoU")
+                for cell in pred_cells:
+                    bbox = cell['bbox']
+                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                             edgecolor='none',facecolor="magenta", alpha=0.15)
+                    ax.add_patch(rect)
+                    rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                             edgecolor="magenta",facecolor='none',linestyle="--")
+                    ax.add_patch(rect)
+                    cell_rect = Rect()
+                    for span in cell['spans']:
+                        bbox = span['bbox']
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor='none',facecolor="green", alpha=0.2)
+                        ax.add_patch(rect)
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor="green",facecolor='none',linestyle="--")
+                        ax.add_patch(rect)
+                        cell_rect.includeRect(bbox)
+                    if cell_rect.getArea() > 0:
+                        bbox = list(cell_rect)
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor='none',facecolor="red", alpha=0.15)
+                        ax.add_patch(rect)
+                        rect = patches.Rectangle(bbox[:2], bbox[2]-bbox[0], bbox[3]-bbox[1], linewidth=1,
+                                                 edgecolor="red",facecolor='none',linestyle="--")
+                        ax.add_patch(rect)
+
+                fig.set_size_inches((15, 18))
+                if args.images_output_path:
+                    plt.savefig(os.path.join(args.images_output_path, img_filename.split('.')[0] + '_pred.jpg'))
+                else:
+                    plt.show()
+                plt.clf()
+
+    if evaluate_on_gt:
+        with open(args.metrics_save_filepath, 'w') as outfile:
+            json.dump(all_metrics, outfile)
+        print("Total time taken: ", datetime.now() - st_time)
+
+        print('-' * 100)
+        results = [result for result in all_metrics if result['num_spanning_cells'] == 0]
+        print("Results on simple tables ({} total):".format(len(results)))
+        print("GriTS_RawLoc: {}".format(np.mean([result['grits_rawloc'] for result in results])))
+        print("GriTS_Loc: {}".format(np.mean([result['grits_loc'] for result in results])))
+        print("GriTS_Cont: {}".format(np.mean([result['grits_cont'] for result in results])))
+        print("GriTS_Top: {}".format(np.mean([result['grits_top'] for result in results])))
+        print("Adjacency f-score: {}".format(np.mean([result['adjacency_nonblank_fscore'] for result in results])))
+        print("Adjacency w/ blanks f-score: {}".format(np.mean([result['adjacency_withblank_fscore'] for result in results])))
+
+        print('-' * 50)
+        results = [result for result in all_metrics if result['num_spanning_cells'] > 0]
+        print("Results on complicated tables ({} total):".format(len(results)))
+        print("GriTS_RawLoc: {}".format(np.mean([result['grits_rawloc'] for result in results])))
+        print("GriTS_Loc: {}".format(np.mean([result['grits_loc'] for result in results])))
+        print("GriTS_Cont: {}".format(np.mean([result['grits_cont'] for result in results])))
+        print("GriTS_Top: {}".format(np.mean([result['grits_top'] for result in results])))
+        print("Adjacency f-score: {}".format(np.mean([result['adjacency_nonblank_fscore'] for result in results])))
+        print("Adjacency w/ blanks f-score: {}".format(np.mean([result['adjacency_withblank_fscore'] for result in results])))
+
+        print('-' * 50)
+        results = [result for result in all_metrics]
+        print("Results on all tables ({} total):".format(len(results)))
+        print("GriTS_RawLoc: {}".format(np.mean([result['grits_rawloc'] for result in results if not math.isnan(result['grits_rawloc'])])))
+        print("GriTS_Loc: {}".format(np.mean([result['grits_loc'] for result in results])))
+        print("GriTS_Cont: {}".format(np.mean([result['grits_cont'] for result in results])))
+        print("GriTS_Top: {}".format(np.mean([result['grits_top'] for result in results])))
+        print("Adjacency f-score: {}".format(np.mean([result['adjacency_nonblank_fscore'] for result in results])))
+        print("Adjacency w/ blanks f-score: {}".format(np.mean([result['adjacency_withblank_fscore'] for result in results])))
+        # We can plot the graphs to see the correlation between different variations
+        # of similarity metrics by using plot_graph fn as shown below
+        #
+        # plot_graph([result[0] for result in results], [result[2] for result in results], "Raw BBox IoU", "BBox IoU")
 
 
 if __name__ == "__main__":

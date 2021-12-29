@@ -17,7 +17,8 @@ import util.misc as utils
 import datasets.transforms as R
 
 from config import Args
-from table_datasets import PDFTablesDataset, TightAnnotationCrop, RandomPercentageCrop, RandomErasingWithTarget, ToPILImageWithTarget, RandomMaxResize, RandomCrop
+from table_datasets import PDFTablesDataset, TightAnnotationCrop, RandomPercentageCrop, RandomErasingWithTarget, \
+    ToPILImageWithTarget, RandomMaxResize, RandomCrop, OOSDataset
 from grits import grits
 
 
@@ -44,6 +45,8 @@ def get_args():
                         default='train',
                         help="Toggle between different modes")
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--custom_images', action='store_true')
+    parser.add_argument('--images_output_path', help='Path to save final images')
 
     return parser.parse_args()
 
@@ -183,7 +186,7 @@ def get_data(args):
                                         do_crop=False,
                                         make_coco=True,
                                         image_extension=".jpg",
-                                        xml_fileset="test_filelist.txt",
+                                        xml_fileset="test_filelist_head.txt",
                                         class_map=class_map)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
 
@@ -196,14 +199,21 @@ def get_data(args):
         return data_loader_test, dataset_test
 
     elif args.mode == "grits":
-        dataset_test = PDFTablesDataset(os.path.join(args.data_root_dir,
-                                                     "test"),
-                                        RandomMaxResize(1000, 1000),
-                                        include_original=True,
-                                        make_coco=False,
-                                        image_extension=".jpg",
-                                        xml_fileset="test_filelist.txt",
-                                        class_map=class_map)
+        if args.custom_images:
+            dataset_test = OOSDataset(
+                img_folder=os.path.join(args.data_root_dir),
+                transformation=RandomMaxResize(1000, 1000),
+                include_original=True
+            )
+        else:
+            dataset_test = PDFTablesDataset(os.path.join(args.data_root_dir,
+                                                         "test"),
+                                            RandomMaxResize(1000, 1000),
+                                            include_original=True,
+                                            make_coco=False,
+                                            image_extension=".jpg",
+                                            xml_fileset="test_filelist_head.txt",
+                                            class_map=class_map)
         return dataset_test
 
 
@@ -327,6 +337,8 @@ def train(args, model, criterion, postprocessors, device):
 def main():
     cmd_args = get_args().__dict__
     args = Args
+    args.device = 'cpu'
+    args.num_workers = 0
     for key in cmd_args:
         val = cmd_args[key]
         setattr(args, key, val)
@@ -350,7 +362,7 @@ def main():
     elif args.mode == "grits":
         assert args.data_type == "structure", "GriTS is only applicable to structure recognition"
         dataset_test = get_data(args)
-        grits(args, model, dataset_test, device)
+        grits(args, model, dataset_test, device, evaluate_on_gt=not args.custom_images)
 
 
 if __name__ == "__main__":
