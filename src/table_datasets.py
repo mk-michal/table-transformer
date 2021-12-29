@@ -287,6 +287,7 @@ class RandomMaxResize(object):
 def _isArrayLike(obj):
     return hasattr(obj, '__iter__') and hasattr(obj, '__len__')
 
+
 class PDFTablesDataset(torch.utils.data.Dataset):
     def __init__(self, root, transforms=None, max_size=None, do_crop=True, make_coco=False,
                  include_original=False, max_neg=None, negatives_root=None, xml_fileset="filelist.txt",
@@ -495,3 +496,33 @@ class PDFTablesDataset(torch.utils.data.Dataset):
 
             ids = [ann['id'] for ann in anns]
         return ids
+
+
+class OOSDataset(torch.utils.data.Dataset):
+    def __init__(self, img_folder, transformation, include_original = False):
+        self.img_folder = img_folder
+        self.page_ids = [f for f in os.listdir(img_folder) if os.path.isfile(os.path.join(img_folder, f))]
+        self.transforms = transformation
+        self.include_original = include_original
+
+
+    def __len__(self):
+        return len(self.page_ids)
+
+    def __getitem__(self, item):
+        img = Image.open(os.path.join(self.img_folder, self.page_ids[item - 1])).convert("RGB")
+        h, w = img.size
+
+        img_tensor, target = self.transforms(
+            img,
+            {'boxes': [], 'orig_size': torch.as_tensor([int(h), int(w)]), 'image_id': torch.as_tensor([item - 1])}
+        )
+        img_path = os.path.join(self.img_folder, self.page_ids[item - 1])
+        if self.include_original:
+            return img_tensor, target, img, img_path
+        else:
+            return img_tensor, target
+
+
+
+
