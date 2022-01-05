@@ -311,7 +311,7 @@ class PDFTablesDataset(torch.utils.data.Dataset):
             lines = os.listdir(root)
 
         if n_of_samples:
-            lines = random.sample(lines, n_of_samples)
+            lines = random.sample(lines, n_of_samples) if n_of_samples < len(lines) else lines
         xml_page_ids = set([f.strip().replace(".xml", "") for f in lines if f.strip().endswith(".xml")])
             
         image_directory = os.path.join(root, "..", "images")
