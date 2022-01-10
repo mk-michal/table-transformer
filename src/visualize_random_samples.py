@@ -104,10 +104,10 @@ def plot_img_with_bboxes(image, bboxes, classes, output_path, class_labels, xyxy
             text_coord += 30
             plt.text(20, text_coord, cls, color=class_labels_info[cls]['color'], fontsize=20)
 
-    plt.savefig(output_path, dpi=300)  ## show the plot
+    plt.savefig(output_path, dpi=200)  ## show the plot
 
 
-def main(cfg):
+def main(cfg, full_pipeline: bool = False):
 
     # get dataset
     args = Args
@@ -121,7 +121,7 @@ def main(cfg):
     model, criterion, postprocessors = get_model(args, args.device)
 
     if args.custom:
-        dataset_test = OOSDataset(args.input_path,get_transform(args.data_type, "val"))
+        dataset_test = OOSDataset(img_folder= args.input_path, transformation=get_transform(args.data_type, "val"))
     else:
         dataset_test = PDFTablesDataset(args.input_path,
                                         get_transform(args.data_type, "val"),
@@ -138,6 +138,11 @@ def main(cfg):
                                   collate_fn=utils.collate_fn,
                                   num_workers=0)
 
+    if full_pipeline:
+        args.data_type = 'structure'
+        args.model_load_path = '/home/michal/datasets/dataset_1_mil/model_structure.pth'
+        model_structure, _, postprocessors_structure = get_model(args, args.device)
+        get_transform(args.data_type, "val")
 
     for samples, targets in data_loader_test:
         samples = samples.to(args.device)
@@ -146,11 +151,100 @@ def main(cfg):
         outputs = model(samples)
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes)
+
         plot_results(samples, targets, outputs, results, dataset_test, args.output_path, plot_gt=False)
 
+        if full_pipeline:
+            bboxes = []
+            page_ids = []
+            for output_bboxes, result_score, target, target_size in zip(outputs['pred_boxes'], results, targets, orig_target_sizes):
+                bboxes_filtered = list(output_bboxes[result_score['scores'] > 0.5])
+                for bbox in bboxes_filtered:
+                    bbox_xyxy = box_cxcywh_to_xyxy_np(bbox.detach())
+                    bbox_xyxy = [
+                        bbox_xyxy[0] * samples.tensors[0].shape[2] - 30,
+                        bbox_xyxy[1] * samples.tensors[0].shape[1] - 30,
+                        bbox_xyxy[2] * samples.tensors[0].shape[2] + 30,
+                        bbox_xyxy[3] * samples.tensors[0].shape[1] + 30]
+
+
+                    bbox_resized = resize_bbox(list(map(int, bbox_xyxy)),
+                        in_size=(samples.tensors[0].shape[2], samples.tensors[0].shape[1]),
+                        out_size=(target_size.tolist()[0], target_size.tolist()[1])
+                    )
+                    bboxes.append(bbox_resized)
+                    page_ids.append(dataset_test.page_ids[target['image_id'].item()])
+
+
+            # imgs_tables = create_input_data_structure(results_detection=results, samples=samples)
+            dataset_structure = OOSDataset(
+                img_folder=args.input_path,
+                transformation=get_transform('structure', "val"),
+                page_ids=page_ids,
+                bboxes = bboxes
+            )
+            data_loader_structure = DataLoader(dataset_structure,
+                                          2,
+                                          drop_last=False,
+                                          collate_fn=utils.collate_fn,
+                                          num_workers=0)
+            for samples_structure, targets_structure in data_loader_structure:
+                outputs_structure = model_structure(samples_structure)
+                orig_target_sizes = torch.stack([t["orig_size"] for t in targets_structure], dim=0)
+                results_structure = postprocessors_structure['bbox'](outputs_structure, orig_target_sizes)
+
+                plot_results(
+                    samples_structure,
+                    targets_structure,
+                    outputs_structure,
+                    results_structure,
+                    dataset_structure,
+                    args.output_path,
+                    plot_gt=False,
+                    add_number_to_name=True,
+                )
+
+
+
+
+def create_input_data_structure(results_detection, samples, threshold = 0.5):
+    # get bboxes
+    imgs_tables = []
+    page_ids = []
+    for result, img, mask, target in zip(results_detection, samples.tensors, samples.mask, targets):
+        bboxes_filtered = list(result['boxes'][result['scores'] > threshold])
+
+        for bbox in bboxes_filtered:
+            table_img = img[: ]
+            # data_bboxes.append(bboxes_filtered)
+            img_table = img[:, int(bbox[0]):int(bbox[2]), int(bbox[1]):int(bbox[3])]
+            imgs_tables.append(img_table)
+
+
+    return imgs_tables
+
+
+def resize_bbox(bbox, in_size, out_size):
+    bbox = bbox.copy()
+    x_scale = float(out_size[0]) / in_size[0]
+    y_scale = float(out_size[1]) / in_size[1]
+    bbox[0] = x_scale * bbox[0]
+    bbox[2] = x_scale * bbox[2]
+    bbox[1] = y_scale * bbox[1]
+    bbox[3] = y_scale * bbox[3]
+    return bbox
+
+
+
+
 @torch.no_grad()
-def plot_results(samples, targets, outputs, results, dataset, output_path, threshold = 0.5, plot_gt: bool = True):
-    for mask, sample, target, result, output in zip(samples.mask, samples.tensors, targets, results, outputs['pred_boxes']):
+def plot_results(
+        samples, targets, outputs, results, dataset, output_path, threshold = 0.5, plot_gt: bool = True,
+        add_number_to_name = False, xyxy = False
+):
+    for i, (mask, sample, target, result, output) in enumerate(
+            zip(samples.mask, samples.tensors, targets, results, outputs['pred_boxes'])
+    ):
         s = np.array(sample)
         m = np.array(mask)
         s = s[:, ~m.T[0], :]
@@ -167,12 +261,17 @@ def plot_results(samples, targets, outputs, results, dataset, output_path, thres
                 output_path=os.path.join(output_path, f'{img_name}_gt'),
                 xyxy=False,
             )
-        threshold = 0.6
+        threshold = 0.7
 
         bboxes_filtered = np.array(output[result['scores'] > threshold])
         labels_filtered = np.array(result['labels'][result['scores'] > threshold])
 
         assert len(bboxes_filtered) == len(labels_filtered)
+
+        if add_number_to_name:
+            img_name = f'{img_name.split(".")[0]}_pred_{i}.png'
+        else:
+            img_name = f'{img_name.split(".")[0]}_pred.png'
 
         plot_img_with_bboxes(
             s,
@@ -180,8 +279,8 @@ def plot_results(samples, targets, outputs, results, dataset, output_path, thres
             classes=labels_filtered,
             class_labels=['table', 'table column', 'table row', 'table column header',
                           'table projected row header', 'table spanning cell', 'no object'],
-            output_path=os.path.join(output_path, f'{img_name.split(".")[0]}_pred.png'),
-            xyxy=False,
+            output_path=os.path.join(output_path, img_name),
+            xyxy=xyxy,
         )
 
 
@@ -196,4 +295,4 @@ if __name__ == '__main__':
 
     cfg = parser.parse_args()
     os.makedirs(cfg.output_path, exist_ok=True)
-    main(cfg)
+    main(cfg, full_pipeline=True)

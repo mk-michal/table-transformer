@@ -2,6 +2,7 @@
 Copyright (C) 2021 Microsoft Corporation
 """
 import os
+import string
 import sys
 import random
 import xml.etree.ElementTree as ET
@@ -499,9 +500,18 @@ class PDFTablesDataset(torch.utils.data.Dataset):
 
 
 class OOSDataset(torch.utils.data.Dataset):
-    def __init__(self, img_folder, transformation, include_original = False):
+    def __init__(self, transformation, img_folder, include_original = False, page_ids = None, bboxes = None):
+
         self.img_folder = img_folder
-        self.page_ids = [f for f in os.listdir(img_folder) if os.path.isfile(os.path.join(img_folder, f))]
+        if not page_ids:
+            self.page_ids = [f for f in os.listdir(img_folder) if os.path.isfile(os.path.join(img_folder, f))]
+        else:
+            # generate random strings if folder is unknonw
+            self.page_ids = page_ids
+
+        self.bboxes = bboxes
+        if bboxes:
+            assert len(bboxes) == len(page_ids)
         self.transforms = transformation
         self.include_original = include_original
 
@@ -510,15 +520,18 @@ class OOSDataset(torch.utils.data.Dataset):
         return len(self.page_ids)
 
     def __getitem__(self, item):
-        img = Image.open(os.path.join(self.img_folder, self.page_ids[item - 1])).convert("RGB")
+        img = Image.open(os.path.join(self.img_folder, self.page_ids[item])).convert("RGB")
         h, w = img.size
+        if self.bboxes:
+            img = img.crop(box = [int(x) for x in self.bboxes[item]])
 
         img_tensor, target = self.transforms(
             img,
-            {'boxes': [], 'orig_size': torch.as_tensor([int(h), int(w)]), 'image_id': torch.as_tensor([item - 1])}
+            {'boxes': [], 'orig_size': torch.as_tensor([int(h), int(w)]), 'image_id': torch.as_tensor([item])}
         )
-        img_path = os.path.join(self.img_folder, self.page_ids[item - 1])
+
         if self.include_original:
+            img_path = os.path.join(self.img_folder, self.page_ids[item]) if self.img_folder else None
             return img_tensor, target, img, img_path
         else:
             return img_tensor, target
